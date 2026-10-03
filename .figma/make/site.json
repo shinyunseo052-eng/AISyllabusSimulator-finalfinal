@@ -1,0 +1,10 @@
+{
+  "description": "Effortlessly analyze course syllabi and calculate required scores for desired grades with AI-driven insights, tailored for students aiming for academic success.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

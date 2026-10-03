@@ -1,0 +1,872 @@
+import { useState, useRef, useCallback } from "react";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ReferenceLine,
+  ResponsiveContainer,
+  Line,
+} from "recharts";
+import * as pdfjsLib from "pdfjs-dist";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url
+).toString();
+
+/* ─── Types ──────────────────────────────────────────────── */
+type View = "overview" | "navigator" | "trend";
+
+interface Component {
+  id: string;
+  name: string;
+  weight: number;
+  earned: number | null;
+  total: number;
+}
+
+interface Course {
+  id: string;
+  code: string;
+  name: string;
+  professor: string;
+  credits: number;
+  dropLowest: boolean;
+  components: Component[];
+  parsedFromSyllabus?: boolean;
+}
+
+/* ─── Seed data ──────────────────────────────────────────── */
+const INITIAL_COURSES: Course[] = [
+  {
+    id: "c1",
+    code: "ACCTG 2100",
+    name: "Introduction to Financial Accounting",
+    professor: "Prof. Kim Sunghee",
+    credits: 3,
+    dropLowest: false,
+    components: [
+      { id: "a1",    name: "Assignment 1",  weight: 10, earned: 98,   total: 100 },
+      { id: "a2",    name: "Assignment 2",  weight: 10, earned: 95,   total: 100 },
+      { id: "quiz1", name: "Quiz 1",        weight: 10, earned: 91,   total: 100 },
+      { id: "mid",   name: "Midterm Exam",  weight: 30, earned: 88,   total: 100 },
+      { id: "final", name: "Final Exam",    weight: 40, earned: null, total: 100 },
+    ],
+  },
+  {
+    id: "c2",
+    code: "MGT 1030",
+    name: "Responsibilities of Business",
+    professor: "Prof. Hak-Yoon Kim",
+    credits: 3,
+    dropLowest: false,
+    components: [
+      { id: "r1",     name: "Reflection Paper 1", weight: 15, earned: 96,   total: 100 },
+      { id: "r2",     name: "Reflection Paper 2", weight: 15, earned: 87,   total: 100 },
+      { id: "grp",    name: "Group Project",      weight: 20, earned: null, total: 100 },
+      { id: "mid2",   name: "Midterm Exam",       weight: 20, earned: 83,   total: 100 },
+      { id: "final2", name: "Final Exam",         weight: 30, earned: null, total: 100 },
+    ],
+  },
+  {
+    id: "c3",
+    code: "IS 2010",
+    name: "Spreadsheet Analysis",
+    professor: "Prof. Byoung-gyu Gong",
+    credits: 2,
+    dropLowest: true,
+    components: [
+      { id: "lab1",   name: "Lab 1",        weight: 15, earned: 100,  total: 100 },
+      { id: "lab2",   name: "Lab 2",        weight: 15, earned: 93,   total: 100 },
+      { id: "lab3",   name: "Lab 3",        weight: 15, earned: 89,   total: 100 },
+      { id: "proj",   name: "Final Project",weight: 25, earned: null, total: 100 },
+      { id: "final3", name: "Final Exam",   weight: 30, earned: null, total: 100 },
+    ],
+  },
+];
+
+/* ─── Grade scale ────────────────────────────────────────── */
+const GRADES = [
+  { label: "A+", min: 95, gpa: 4.5 },
+  { label: "A",  min: 90, gpa: 4.0 },
+  { label: "B+", min: 85, gpa: 3.5 },
+  { label: "B",  min: 80, gpa: 3.0 },
+  { label: "C+", min: 75, gpa: 2.5 },
+  { label: "C",  min: 70, gpa: 2.0 },
+  { label: "D",  min: 60, gpa: 1.0 },
+  { label: "F",  min: 0,  gpa: 0.0 },
+];
+
+function gradeInfo(pct: number) {
+  return GRADES.find((g) => pct >= g.min) ?? GRADES[GRADES.length - 1];
+}
+function gradeColor(label: string) {
+  if (label.startsWith("A")) return "#16a34a";
+  if (label.startsWith("B")) return "#2563eb";
+  if (label.startsWith("C")) return "#ca8a04";
+  return "#dc2626";
+}
+
+/* ─── Core math ──────────────────────────────────────────── */
+// Weighted average: Σ(score% × weight) / 100
+function computeProjected(course: Course, inputs: Record<string, string>) {
+  let sum = 0;
+  for (const c of course.components) {
+    const score = c.earned !== null ? c.earned : parseFloat(inputs[c.id] ?? "");
+    if (isNaN(score)) continue; // skip blank pending inputs
+    sum += (score / c.total) * c.weight;
+  }
+  return sum; // already percentage
+}
+
+// Required score on one component to hit target, others at their input/earned value
+function requiredOn(
+  course: Course,
+  targetPct: number,
+  compId: string,
+  inputs: Record<string, string>
+): number {
+  let fixed = 0;
+  let targetWeight = 0;
+  for (const c of course.components) {
+    if (c.id === compId) { targetWeight = c.weight; continue; }
+    const score = c.earned !== null ? c.earned : parseFloat(inputs[c.id] ?? "");
+    if (!isNaN(score)) fixed += (score / c.total) * c.weight;
+  }
+  if (targetWeight === 0) return NaN;
+  return ((targetPct - fixed) / targetWeight) * 100;
+}
+
+// Current grade based on graded components only (normalized)
+function computeCurrent(course: Course) {
+  const graded = course.components.filter((c) => c.earned !== null);
+  if (!graded.length) return null;
+  let ws = 0, tw = 0;
+  for (const c of graded) { ws += (c.earned! / c.total) * c.weight; tw += c.weight; }
+  return (ws / tw) * 100;
+}
+
+// Safety margin: what grade is locked in if remaining items score 0 / 100
+function safetyMargin(course: Course, inputs: Record<string, string>) {
+  const remaining = course.components.filter((c) => c.earned === null);
+  let fixedSum = 0;
+  for (const c of course.components) {
+    if (c.earned !== null) fixedSum += (c.earned / c.total) * c.weight;
+  }
+  const minScore = fixedSum; // all pending = 0
+  const maxScore = fixedSum + remaining.reduce((s, c) => s + c.weight, 0); // all pending = 100
+  return { minScore, maxScore, remaining };
+}
+
+// Trend data
+function buildTrend(course: Course, inputs: Record<string, string>) {
+  let runW = 0, runWS = 0;
+  return course.components.map((c) => {
+    const score = c.earned !== null ? c.earned : parseFloat(inputs[c.id] ?? "NaN");
+    const pct = isNaN(score) ? null : (score / c.total) * 100;
+    if (pct !== null) { runW += c.weight; runWS += pct * c.weight; }
+    return {
+      name: c.name.replace(/Assignment/g, "Assign.").replace(/Examination/g, "Exam"),
+      score: pct !== null ? Math.round(pct * 10) / 10 : null,
+      cumulative: runW > 0 ? Math.round((runWS / runW) * 10) / 10 : null,
+      pending: c.earned === null,
+    };
+  });
+}
+
+// Smart strategy: assume easy items are 100, solve for heaviest remaining
+function smartStrategy(course: Course, targetPct: number, inputs: Record<string, string>) {
+  const remaining = course.components.filter((c) => c.earned === null);
+  if (remaining.length === 0) return null;
+  const heaviest = [...remaining].sort((a, b) => b.weight - a.weight)[0];
+  // assume all others are 100
+  const assumeInputs: Record<string, string> = { ...inputs };
+  for (const c of remaining) {
+    if (c.id !== heaviest.id) assumeInputs[c.id] = "100";
+  }
+  const needed = requiredOn(course, targetPct, heaviest.id, assumeInputs);
+  return { heaviest, needed, others: remaining.filter((c) => c.id !== heaviest.id) };
+}
+
+/* ─── PDF + AI helpers ───────────────────────────────────── */
+async function extractPdfText(file: File): Promise<string> {
+  const ab = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: ab }).promise;
+  const pages: string[] = [];
+  for (let i = 1; i <= Math.min(pdf.numPages, 8); i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    pages.push(content.items.map((x: any) => x.str).join(" "));
+  }
+  return pages.join("\n");
+}
+
+async function parseSyllabus(text: string, apiKey: string): Promise<Partial<Course>> {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-5-20251101",
+      max_tokens: 1024,
+      messages: [{
+        role: "user",
+        content: `Extract the grading structure from this syllabus. Return ONLY valid JSON (no markdown):
+{
+  "code": "e.g. CS 101",
+  "name": "full course name",
+  "professor": "Prof. Name",
+  "credits": 3,
+  "dropLowest": false,
+  "components": [
+    { "id": "unique_id", "name": "component name", "weight": 20, "total": 100 }
+  ]
+}
+Rules: weights must sum to 100. Use total=100 if not stated. dropLowest=true only if explicitly mentioned.
+Syllabus:\n${text.slice(0, 6000)}`,
+      }],
+    }),
+  });
+  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error((e as any)?.error?.message ?? `API ${res.status}`); }
+  const data = await res.json();
+  const parsed = JSON.parse(data.content[0].text.replace(/```json|```/g, "").trim());
+  return { ...parsed, components: parsed.components.map((c: any) => ({ ...c, earned: null, total: c.total ?? 100 })) };
+}
+
+/* ─── Syllabus Modal ─────────────────────────────────────── */
+function SyllabusModal({ courseId, onClose, onParsed }: {
+  courseId: string;
+  onClose: () => void;
+  onParsed: (id: string, data: Partial<Course>) => void;
+}) {
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("gp_key") ?? "");
+  const [file, setFile] = useState<File | null>(null);
+  const [status, setStatus] = useState<"idle" | "extracting" | "parsing" | "done" | "error">("idle");
+  const [error, setError] = useState("");
+  const [preview, setPreview] = useState<Partial<Course> | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = (f: File) => { if (f.type !== "application/pdf") { setError("PDF files only."); return; } setFile(f); setError(""); };
+
+  const parse = useCallback(async () => {
+    if (!file || !apiKey.trim()) { setError("Select a PDF and enter your API key."); return; }
+    localStorage.setItem("gp_key", apiKey.trim());
+    setStatus("extracting"); setError("");
+    try {
+      const text = await extractPdfText(file);
+      setStatus("parsing");
+      const parsed = await parseSyllabus(text, apiKey.trim());
+      setPreview(parsed); setStatus("done");
+    } catch (e: any) { setError(e.message); setStatus("error"); }
+  }, [file, apiKey]);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 28, width: 460, maxHeight: "80vh", overflow: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.15)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 20 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#111" }}>AI Syllabus Parser</div>
+            <div style={{ fontSize: 12, color: "#aaa", marginTop: 2 }}>Upload a PDF — AI extracts grading weights automatically</div>
+          </div>
+          <button onClick={onClose} style={{ border: "none", background: "none", fontSize: 20, color: "#bbb", cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+
+        <label style={{ fontSize: 11, fontWeight: 600, color: "#555", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Anthropic API Key</label>
+        <input type="password" placeholder="sk-ant-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+          style={{ width: "100%", padding: "10px 12px", border: "1px solid #e0e0e0", borderRadius: 8, fontSize: 13, fontFamily: "'DM Mono', monospace", outline: "none", marginBottom: 4 }} />
+        <div style={{ fontSize: 10, color: "#bbb", marginBottom: 16 }}>Saved locally in your browser.</div>
+
+        <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleFile(f); }}
+          onClick={() => fileRef.current?.click()}
+          style={{ border: `2px dashed ${file ? "#16a34a" : "#e0e0e0"}`, borderRadius: 10, padding: "20px 16px", textAlign: "center", cursor: "pointer", marginBottom: 16, background: file ? "#f0fdf4" : "#fafafa" }}>
+          <input ref={fileRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+          <div style={{ fontSize: 22, marginBottom: 4 }}>{file ? "✅" : "📄"}</div>
+          <div style={{ fontSize: 13, color: file ? "#16a34a" : "#888", fontWeight: file ? 600 : 400 }}>{file ? file.name : "Drop syllabus PDF here or click to browse"}</div>
+        </div>
+
+        {error && <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#dc2626", marginBottom: 14 }}>{error}</div>}
+
+        {status !== "done" && (
+          <button onClick={parse} disabled={status === "extracting" || status === "parsing"}
+            style={{ width: "100%", padding: 12, background: ["extracting", "parsing"].includes(status) ? "#f0f0f0" : "#111", color: ["extracting", "parsing"].includes(status) ? "#888" : "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
+            {status === "extracting" ? "Extracting text…" : status === "parsing" ? "Claude is parsing…" : "Parse with AI"}
+          </button>
+        )}
+
+        {status === "done" && preview && (
+          <div style={{ border: "1px solid #e0e0e0", borderRadius: 10, padding: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#111", marginBottom: 2 }}>{preview.code} · {preview.name}</div>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>{preview.professor} · {preview.credits} credits{preview.dropLowest ? " · Drop Lowest" : ""}</div>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr><th style={{ textAlign: "left", fontSize: 10, color: "#aaa", fontWeight: 600, paddingBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Component</th><th style={{ textAlign: "left", fontSize: 10, color: "#aaa", fontWeight: 600, paddingBottom: 6, textTransform: "uppercase" }}>Weight</th></tr></thead>
+              <tbody>
+                {(preview.components ?? []).map((c: any) => (
+                  <tr key={c.id}><td style={{ fontSize: 12, color: "#333", padding: "5px 0", borderTop: "1px solid #f4f4f4" }}>{c.name}</td><td style={{ fontSize: 12, fontFamily: "'DM Mono', monospace", color: "#555", padding: "5px 0", borderTop: "1px solid #f4f4f4" }}>{c.weight}%</td></tr>
+                ))}
+                <tr><td style={{ fontSize: 11, color: "#aaa", paddingTop: 8, fontWeight: 600 }}>Total</td><td style={{ fontSize: 11, fontFamily: "'DM Mono', monospace", color: "#111", fontWeight: 700, paddingTop: 8 }}>{(preview.components ?? []).reduce((s: number, c: any) => s + c.weight, 0)}%</td></tr>
+              </tbody>
+            </table>
+            <button onClick={() => { onParsed(courseId, preview!); onClose(); }}
+              style={{ width: "100%", padding: 11, background: "#111", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer", marginTop: 14 }}>
+              Apply to Course
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Small UI atoms ─────────────────────────────────────── */
+function Tag({ children, color = "#888" }: { children: React.ReactNode; color?: string }) {
+  return (
+    <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 4, background: color + "18", color, fontFamily: "'DM Mono', monospace", letterSpacing: "0.04em" }}>
+      {children}
+    </span>
+  );
+}
+
+function ChartTip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 8, padding: "10px 14px", boxShadow: "0 4px 16px rgba(0,0,0,0.08)" }}>
+      <div style={{ fontSize: 11, color: "#888", marginBottom: 6 }}>{label}</div>
+      {payload.map((p: any) => p.value !== null && (
+        <div key={p.name} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: p.color }} />
+          <span style={{ color: "#555" }}>{p.name === "score" ? "Item" : "Cumulative"}</span>
+          <span style={{ fontFamily: "'DM Mono', monospace", fontWeight: 600, color: "#111", marginLeft: "auto", paddingLeft: 16 }}>{p.value}%</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ─── Cutoff Table ───────────────────────────────────────── */
+function CutoffTable({ course, inputs }: { course: Course; inputs: Record<string, string> }) {
+  const remaining = course.components.filter((c) => c.earned === null);
+  if (remaining.length === 0) return <div style={{ fontSize: 13, color: "#aaa", textAlign: "center", padding: "24px 0" }}>All items graded.</div>;
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr style={{ borderBottom: "2px solid #f0f0f0" }}>
+            <th style={{ textAlign: "left", padding: "8px 12px 10px 0", fontSize: 11, color: "#aaa", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Grade</th>
+            <th style={{ textAlign: "left", padding: "8px 0 10px", fontSize: 11, color: "#aaa", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Cutoff</th>
+            {remaining.map((c) => (
+              <th key={c.id} style={{ textAlign: "right", padding: "8px 0 10px 12px", fontSize: 11, color: "#aaa", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", maxWidth: 90 }}>
+                {c.name.replace("Examination", "Exam").replace("Assignment", "Assign.")}
+              </th>
+            ))}
+            <th style={{ textAlign: "right", padding: "8px 0 10px 12px", fontSize: 11, color: "#aaa", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Feasibility</th>
+          </tr>
+        </thead>
+        <tbody>
+          {GRADES.slice(0, 7).map((g) => {
+            const neededs = remaining.map((c) => requiredOn(course, g.min, c.id, inputs));
+            const worstNeeded = Math.max(...neededs);
+            const allImpossible = neededs.every((n) => n > 100);
+            const allEasy = neededs.every((n) => n <= 0);
+            const feasColor = allImpossible ? "#dc2626" : allEasy ? "#16a34a" : "#111";
+            const feasLabel = allImpossible ? "Impossible" : allEasy ? "Secured ✓" : worstNeeded <= 70 ? "Safe" : worstNeeded <= 85 ? "Reachable" : "Stretch";
+
+            return (
+              <tr key={g.label} style={{ borderBottom: "1px solid #f8f8f8" }}>
+                <td style={{ padding: "11px 12px 11px 0" }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 14, fontWeight: 700, color: gradeColor(g.label) }}>{g.label}</span>
+                </td>
+                <td style={{ padding: "11px 0", fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888" }}>{g.min}%+</td>
+                {neededs.map((needed, i) => {
+                  const imp = needed > 100;
+                  const sec = needed <= 0;
+                  return (
+                    <td key={i} style={{ padding: "11px 0 11px 12px", textAlign: "right" }}>
+                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, fontWeight: 600, color: imp ? "#dc2626" : sec ? "#16a34a" : "#111" }}>
+                        {imp ? "N/A" : sec ? "Any" : `${needed.toFixed(0)}`}
+                      </span>
+                    </td>
+                  );
+                })}
+                <td style={{ padding: "11px 0 11px 12px", textAlign: "right" }}>
+                  <Tag color={feasColor}>{feasLabel}</Tag>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ─── Main App ───────────────────────────────────────────── */
+export default function App() {
+  const [courses, setCourses] = useState<Course[]>(INITIAL_COURSES);
+  const [selectedId, setSelectedId] = useState("c1");
+  const [view, setView] = useState<View>("overview");
+  const [inputs, setInputs] = useState<Record<string, string>>({});
+  const [targetGrade, setTargetGrade] = useState("A");
+  const [uploadOpen, setUploadOpen] = useState(false);
+
+  const course = courses.find((c) => c.id === selectedId)!;
+  const remaining = course.components.filter((c) => c.earned === null);
+  const graded = course.components.filter((c) => c.earned !== null);
+  const projected = computeProjected(course, inputs);
+  const current = computeCurrent(course);
+  const projInfo = gradeInfo(projected);
+  const targetMin = GRADES.find((g) => g.label === targetGrade)?.min ?? 90;
+  const { minScore, maxScore } = safetyMargin(course, inputs);
+  const minGrade = gradeInfo(minScore);
+  const maxGrade = gradeInfo(maxScore);
+  const strategy = smartStrategy(course, targetMin, inputs);
+  const trend = buildTrend(course, inputs);
+
+  const handleParsed = (courseId: string, data: Partial<Course>) => {
+    setCourses((prev) => prev.map((c) => c.id !== courseId ? c : {
+      ...c,
+      code: data.code ?? c.code,
+      name: data.name ?? c.name,
+      professor: data.professor ?? c.professor,
+      credits: data.credits ?? c.credits,
+      dropLowest: data.dropLowest ?? c.dropLowest,
+      components: (data.components?.length ?? 0) > 0 ? data.components! : c.components,
+      parsedFromSyllabus: true,
+    }));
+    setInputs({});
+  };
+
+  const setInput = (id: string, val: string) => setInputs((prev) => ({ ...prev, [id]: val }));
+
+  // Required scores for selected target
+  const requiredScores = remaining.map((c) => ({
+    comp: c,
+    needed: requiredOn(course, targetMin, c.id, inputs),
+  }));
+
+  return (
+    <div style={{ display: "flex", height: "100%", background: "#f5f5f5" }}>
+      {uploadOpen && <SyllabusModal courseId={selectedId} onClose={() => setUploadOpen(false)} onParsed={handleParsed} />}
+
+      {/* ── Sidebar ── */}
+      <aside style={{ width: 236, background: "#fff", borderRight: "1px solid #ebebeb", display: "flex", flexDirection: "column", flexShrink: 0 }}>
+        <div style={{ padding: "22px 20px 18px", borderBottom: "1px solid #ebebeb" }}>
+          <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-0.04em", color: "#111" }}>GradePilot</div>
+          <div style={{ fontSize: 11, color: "#bbb", marginTop: 2, fontFamily: "'DM Mono', monospace" }}>Grade Navigation Engine</div>
+        </div>
+
+        <div style={{ padding: "10px 10px 0" }}>
+          {(["overview", "navigator", "trend"] as View[]).map((v) => {
+            const labels: Record<View, string> = { overview: "Course Overview", navigator: "Grade Navigator", trend: "Score Trend" };
+            const icons: Record<View, string> = { overview: "▤", navigator: "◎", trend: "↗" };
+            const active = view === v;
+            return (
+              <button key={v} onClick={() => setView(v)}
+                style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", padding: "9px 10px", borderRadius: 7, border: "none", background: active ? "#f2f2f2" : "transparent", color: active ? "#111" : "#999", fontSize: 13, fontWeight: active ? 600 : 400, cursor: "pointer", marginBottom: 2, textAlign: "left" }}>
+                <span style={{ fontSize: 12 }}>{icons[v]}</span>{labels[v]}
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ flex: 1, overflow: "auto", padding: "18px 10px 0" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#ccc", letterSpacing: "0.1em", padding: "0 8px 8px", textTransform: "uppercase" }}>My Courses</div>
+          {courses.map((c) => {
+            const pg = computeProjected(c, inputs);
+            const gi = gradeInfo(pg);
+            const active = c.id === selectedId;
+            return (
+              <button key={c.id} onClick={() => { setSelectedId(c.id); setInputs({}); }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", padding: "10px 10px", borderRadius: 8, border: "none", background: active ? "#f2f2f2" : "transparent", cursor: "pointer", marginBottom: 2, textAlign: "left" }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 1 }}>
+                    <span style={{ fontSize: 10, color: "#bbb", fontFamily: "'DM Mono', monospace" }}>{c.code}</span>
+                    {c.parsedFromSyllabus && <span style={{ fontSize: 9, color: "#16a34a" }}>✦AI</span>}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#111", fontWeight: active ? 600 : 400, lineHeight: 1.3 }}>{c.name}</div>
+                </div>
+                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, fontWeight: 700, color: gradeColor(gi.label), flexShrink: 0, marginLeft: 8 }}>{gi.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ padding: "14px", borderTop: "1px solid #ebebeb" }}>
+          <button onClick={() => setUploadOpen(true)}
+            style={{ width: "100%", padding: "10px", border: "1.5px dashed #ddd", borderRadius: 8, background: "transparent", color: "#999", fontSize: 12, cursor: "pointer", transition: "border-color 0.15s" }}
+            onMouseOver={(e) => (e.currentTarget.style.borderColor = "#111")}
+            onMouseOut={(e) => (e.currentTarget.style.borderColor = "#ddd")}>
+            ✦ Upload Syllabus PDF
+          </button>
+        </div>
+      </aside>
+
+      {/* ── Main ── */}
+      <main style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }}>
+        {/* Topbar */}
+        <div style={{ background: "#fff", borderBottom: "1px solid #ebebeb", padding: "16px 32px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexShrink: 0 }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa" }}>{course.code}</span>
+              <span style={{ color: "#e0e0e0" }}>·</span>
+              <span style={{ fontSize: 11, color: "#aaa" }}>{course.professor}</span>
+              <span style={{ color: "#e0e0e0" }}>·</span>
+              <span style={{ fontSize: 11, color: "#aaa" }}>{course.credits} credits</span>
+              {course.dropLowest && <Tag color="#ca8a04">Drop Lowest</Tag>}
+              {course.parsedFromSyllabus && <Tag color="#16a34a">✦ AI Parsed</Tag>}
+            </div>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: "-0.03em", color: "#111" }}>{course.name}</h1>
+          </div>
+          <div style={{ display: "flex", gap: 20, alignItems: "center", flexShrink: 0 }}>
+            {current !== null && (
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 10, color: "#bbb", fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 2 }}>Current</div>
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#888" }}>{current.toFixed(1)}%</div>
+              </div>
+            )}
+            <div style={{ width: 1, height: 30, background: "#ebebeb" }} />
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 10, color: "#bbb", fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 2 }}>Projected</div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 26, fontWeight: 700, color: gradeColor(projInfo.label), transition: "color 0.25s" }}>{projInfo.label}</span>
+                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#aaa" }}>{projected.toFixed(1)}%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, padding: "28px 32px", overflow: "auto" }}>
+
+          {/* ── OVERVIEW ── */}
+          {view === "overview" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 20 }}>
+              {/* Left: components */}
+              <div>
+                <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 12, overflow: "hidden", marginBottom: 20 }}>
+                  <div style={{ padding: "16px 20px", borderBottom: "1px solid #f4f4f4", display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: "#111" }}>Grade Components</span>
+                    <span style={{ fontSize: 11, color: "#bbb" }}>{graded.length}/{course.components.length} graded</span>
+                  </div>
+                  <div>
+                    {/* Header */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 70px 120px 50px", padding: "10px 20px", borderBottom: "1px solid #f4f4f4", gap: 8 }}>
+                      {["Component", "Weight", "Score", "Grade"].map((h) => (
+                        <div key={h} style={{ fontSize: 10, color: "#bbb", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em" }}>{h}</div>
+                      ))}
+                    </div>
+                    {course.components.map((comp, i) => {
+                      const isPending = comp.earned === null;
+                      const rawScore = isPending ? inputs[comp.id] : String(comp.earned);
+                      const numScore = isPending ? parseFloat(inputs[comp.id] ?? "") : comp.earned!;
+                      const pct = isNaN(numScore) ? null : (numScore / comp.total) * 100;
+                      const gi = pct !== null ? gradeInfo(pct) : null;
+                      const isLast = i === course.components.length - 1;
+                      return (
+                        <div key={comp.id} style={{ display: "grid", gridTemplateColumns: "1fr 70px 120px 50px", padding: "13px 20px", borderBottom: isLast ? "none" : "1px solid #f8f8f8", gap: 8, alignItems: "center" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div style={{ width: 7, height: 7, borderRadius: "50%", background: isPending ? "#e0e0e0" : "#111", flexShrink: 0 }} />
+                            <span style={{ fontSize: 13, color: "#111", fontWeight: 500 }}>{comp.name}</span>
+                          </div>
+                          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#aaa" }}>{comp.weight}%</div>
+                          <div>
+                            {isPending ? (
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={comp.total}
+                                  placeholder="—"
+                                  value={inputs[comp.id] ?? ""}
+                                  onChange={(e) => setInput(comp.id, e.target.value)}
+                                  style={{ width: 72, padding: "5px 8px", border: "1.5px solid #e0e0e0", borderRadius: 6, fontSize: 13, fontFamily: "'DM Mono', monospace", outline: "none", color: "#111", textAlign: "center" }}
+                                  onFocus={(e) => (e.target.style.borderColor = "#111")}
+                                  onBlur={(e) => (e.target.style.borderColor = "#e0e0e0")}
+                                />
+                                <span style={{ fontSize: 11, color: "#ccc", fontFamily: "'DM Mono', monospace" }}>/{comp.total}</span>
+                              </div>
+                            ) : (
+                              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#111", fontWeight: 500 }}>
+                                {comp.earned}/{comp.total}
+                              </span>
+                            )}
+                          </div>
+                          <div>
+                            {gi ? (
+                              <Tag color={isPending ? "#aaa" : gradeColor(gi.label)}>{gi.label}</Tag>
+                            ) : (
+                              <span style={{ fontSize: 12, color: "#ddd" }}>—</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Safety margin */}
+                <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 12, padding: "20px" }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#111", marginBottom: 4 }}>Safety Margin Diagnosis</div>
+                  <div style={{ fontSize: 12, color: "#aaa", marginBottom: 16 }}>
+                    Best and worst case based on remaining assessments.
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    <div style={{ padding: "14px", background: "#fafafa", borderRadius: 8, border: "1px solid #f0f0f0" }}>
+                      <div style={{ fontSize: 10, color: "#bbb", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>If all remaining = 0</div>
+                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 22, fontWeight: 700, color: gradeColor(minGrade.label) }}>{minGrade.label}</div>
+                      <div style={{ fontSize: 12, color: "#aaa", marginTop: 2 }}>{minScore.toFixed(1)}% floor</div>
+                      {minScore >= 70 && <div style={{ fontSize: 11, color: "#16a34a", marginTop: 6 }}>✓ {minGrade.label} is secured no matter what.</div>}
+                    </div>
+                    <div style={{ padding: "14px", background: "#fafafa", borderRadius: 8, border: "1px solid #f0f0f0" }}>
+                      <div style={{ fontSize: 10, color: "#bbb", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>If all remaining = 100</div>
+                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 22, fontWeight: 700, color: gradeColor(maxGrade.label) }}>{maxGrade.label}</div>
+                      <div style={{ fontSize: 12, color: "#aaa", marginTop: 2 }}>{maxScore.toFixed(1)}% ceiling</div>
+                      {maxScore < 90 && <div style={{ fontSize: 11, color: "#dc2626", marginTop: 6 }}>✗ A is mathematically impossible.</div>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right: quick navigator */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 12, padding: "20px" }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#111", marginBottom: 4 }}>Quick Navigator</div>
+                  <div style={{ fontSize: 12, color: "#aaa", marginBottom: 14 }}>Pick a target — see required scores instantly.</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+                    {GRADES.slice(0, 5).map((g) => {
+                      const active = targetGrade === g.label;
+                      return (
+                        <button key={g.label} onClick={() => setTargetGrade(g.label)}
+                          style={{ padding: "6px 14px", borderRadius: 99, border: `1.5px solid ${active ? gradeColor(g.label) : "#e0e0e0"}`, background: active ? gradeColor(g.label) + "14" : "#fff", color: active ? gradeColor(g.label) : "#888", fontSize: 13, fontWeight: active ? 700 : 400, cursor: "pointer", fontFamily: "'DM Mono', monospace" }}>
+                          {g.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {remaining.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "#aaa", textAlign: "center", padding: "16px 0" }}>All items graded.</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      {requiredScores.map(({ comp, needed }) => {
+                        const imp = needed > 100;
+                        const sec = needed <= 0;
+                        const color = imp ? "#dc2626" : sec ? "#16a34a" : "#111";
+                        return (
+                          <div key={comp.id} style={{ padding: "14px", border: `1.5px solid ${imp ? "#fecaca" : sec ? "#bbf7d0" : "#f0f0f0"}`, borderRadius: 10, background: imp ? "#fef2f2" : sec ? "#f0fdf4" : "#fafafa" }}>
+                            <div style={{ fontSize: 11, color: "#aaa", marginBottom: 5 }}>{comp.name} <span style={{ color: "#ddd" }}>({comp.weight}%)</span></div>
+                            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, fontWeight: 700, color, lineHeight: 1 }}>
+                                {imp ? "N/A" : sec ? "Any" : `${needed.toFixed(1)}`}
+                              </span>
+                              {!imp && !sec && <span style={{ fontSize: 13, color: "#bbb", fontFamily: "'DM Mono', monospace" }}>/100</span>}
+                            </div>
+                            <div style={{ fontSize: 11, marginTop: 4, color: imp ? "#dc2626" : sec ? "#16a34a" : "#555" }}>
+                              {imp ? `Even 100/100 won't reach ${targetGrade}` : sec ? `${targetGrade} already secured` : `needed on ${comp.name} for ${targetGrade}`}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* GPA */}
+                <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 12, padding: "18px" }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#111", marginBottom: 10 }}>GPA Impact</div>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 6 }}>
+                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 30, fontWeight: 700, color: gradeColor(projInfo.label), transition: "color 0.25s" }}>
+                      {projInfo.gpa.toFixed(1)}
+                    </span>
+                    <span style={{ fontSize: 13, color: "#bbb" }}>/ 4.5</span>
+                  </div>
+                  <div style={{ height: 5, background: "#f0f0f0", borderRadius: 3, overflow: "hidden" }}>
+                    <div style={{ width: `${(projInfo.gpa / 4.5) * 100}%`, height: "100%", background: gradeColor(projInfo.label), borderRadius: 3, transition: "width 0.4s" }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── NAVIGATOR ── */}
+          {view === "navigator" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              {/* Hero: target selector + required scores */}
+              <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, padding: "28px" }}>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20, marginBottom: 24 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: "#bbb", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Select your target grade</div>
+                    <div style={{ fontSize: 13, color: "#888" }}>GradePilot instantly calculates the exact minimum score you need — no trial and error.</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    {GRADES.slice(0, 5).map((g) => {
+                      const active = targetGrade === g.label;
+                      return (
+                        <button key={g.label} onClick={() => setTargetGrade(g.label)}
+                          style={{ width: 48, height: 48, borderRadius: 10, border: `2px solid ${active ? gradeColor(g.label) : "#e8e8e8"}`, background: active ? gradeColor(g.label) : "#fff", color: active ? "#fff" : "#888", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "'DM Mono', monospace", transition: "all 0.15s" }}>
+                          {g.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {remaining.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "24px 0", color: "#bbb", fontSize: 13 }}>All assessments graded.</div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(remaining.length, 3)}, 1fr)`, gap: 12 }}>
+                    {requiredScores.map(({ comp, needed }) => {
+                      const imp = needed > 100;
+                      const sec = needed <= 0;
+                      const color = imp ? "#dc2626" : sec ? "#16a34a" : "#111";
+                      return (
+                        <div key={comp.id} style={{ padding: "20px", border: `2px solid ${imp ? "#fecaca" : sec ? "#bbf7d0" : "#f0f0f0"}`, borderRadius: 12, background: imp ? "#fef2f2" : sec ? "#f0fdf4" : "#fafafa" }}>
+                          <div style={{ fontSize: 11, color: "#bbb", marginBottom: 6 }}>
+                            {comp.name} · {comp.weight}% weight
+                          </div>
+                          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 42, fontWeight: 800, color, lineHeight: 1, letterSpacing: "-0.03em" }}>
+                            {imp ? "N/A" : sec ? "Any" : `${needed.toFixed(1)}`}
+                          </div>
+                          {!imp && !sec && <div style={{ fontSize: 11, color: "#bbb", fontFamily: "'DM Mono', monospace", marginTop: 2 }}>points needed / 100</div>}
+                          <div style={{ fontSize: 12, marginTop: 10, color: imp ? "#dc2626" : sec ? "#16a34a" : needed <= 70 ? "#16a34a" : needed <= 85 ? "#2563eb" : "#ca8a04", fontWeight: 500 }}>
+                            {imp ? `A ${targetGrade} is out of reach` : sec ? `${targetGrade} already secured` : needed <= 70 ? "Well within reach" : needed <= 85 ? "Challenging but doable" : "You'll need to push hard"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Full cutoff table */}
+              <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, padding: "24px" }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: "#111", marginBottom: 4 }}>Full Grade Cutoff Table</div>
+                <div style={{ fontSize: 12, color: "#aaa", marginBottom: 20 }}>
+                  Every grade threshold calculated at once — so you can choose your strategy, not just check one scenario.
+                </div>
+                <CutoffTable course={course} inputs={inputs} />
+              </div>
+
+              {/* Smart strategy */}
+              {strategy && remaining.length > 1 && (
+                <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, padding: "24px" }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
+                    <div style={{ fontSize: 28, flexShrink: 0 }}>💡</div>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#111", marginBottom: 6 }}>Smart Strategy for {targetGrade}</div>
+                      <div style={{ fontSize: 13, color: "#555", lineHeight: 1.6 }}>
+                        {strategy.needed > 100 ? (
+                          <span style={{ color: "#dc2626" }}>Even if you score 100% on all remaining items, <strong>{targetGrade}</strong> is not achievable. Consider targeting {GRADES[GRADES.findIndex(g => g.label === targetGrade) + 1]?.label ?? "a lower grade"} instead.</span>
+                        ) : strategy.needed <= 0 ? (
+                          <span style={{ color: "#16a34a" }}>You've already secured <strong>{targetGrade}</strong>! Even scoring 0 on all remaining items won't drop you below this grade.</span>
+                        ) : (
+                          <>
+                            If you score <strong>100/100</strong> on {strategy.others.map((c) => c.name).join(", ")}{strategy.others.length > 0 ? ", then " : ""}
+                            you only need <strong style={{ fontSize: 15, color: gradeColor(gradeInfo(strategy.needed).label) }}>{strategy.needed.toFixed(1)} points</strong> on the <strong>{strategy.heaviest.name}</strong> to reach <strong>{targetGrade}</strong>.{" "}
+                            <span style={{ color: "#888" }}>Lock in the easy wins first, then focus your energy on {strategy.heaviest.name}.</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Score input for pending items */}
+              {remaining.length > 0 && (
+                <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, padding: "24px" }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#111", marginBottom: 4 }}>Enter Actual Scores</div>
+                  <div style={{ fontSize: 12, color: "#aaa", marginBottom: 18 }}>As you receive results, enter them here — the table above updates instantly.</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+                    {remaining.map((comp) => {
+                      const val = inputs[comp.id] ?? "";
+                      const num = parseFloat(val);
+                      const gi = !isNaN(num) ? gradeInfo((num / comp.total) * 100) : null;
+                      return (
+                        <div key={comp.id} style={{ padding: "14px", border: "1px solid #f0f0f0", borderRadius: 8 }}>
+                          <div style={{ fontSize: 11, color: "#aaa", marginBottom: 8 }}>{comp.name} <span style={{ color: "#ddd" }}>({comp.weight}%)</span></div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <input
+                              type="number" min={0} max={comp.total} placeholder="Score"
+                              value={val}
+                              onChange={(e) => setInput(comp.id, e.target.value)}
+                              style={{ flex: 1, padding: "8px 10px", border: "1.5px solid #e0e0e0", borderRadius: 7, fontSize: 15, fontFamily: "'DM Mono', monospace", fontWeight: 600, outline: "none", color: "#111", textAlign: "center" }}
+                              onFocus={(e) => (e.target.style.borderColor = "#111")}
+                              onBlur={(e) => (e.target.style.borderColor = "#e0e0e0")}
+                            />
+                            <span style={{ fontSize: 12, color: "#bbb", fontFamily: "'DM Mono', monospace" }}>/{comp.total}</span>
+                            {gi && <Tag color={gradeColor(gi.label)}>{gi.label}</Tag>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── TREND ── */}
+          {view === "trend" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 12, padding: "24px" }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: "#111", marginBottom: 4 }}>Cumulative Score Trend</div>
+                <div style={{ fontSize: 12, color: "#aaa", marginBottom: 24 }}>Running weighted average vs individual item scores. Enter pending scores in Overview or Navigator to fill gaps.</div>
+                <ResponsiveContainer width="100%" height={280}>
+                  <AreaChart data={trend} margin={{ top: 8, right: 24, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#111" stopOpacity={0.07} />
+                        <stop offset="95%" stopColor="#111" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="#f4f4f4" vertical={false} />
+                    <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#bbb" }} axisLine={false} tickLine={false} />
+                    <YAxis domain={[40, 100]} tick={{ fontSize: 10, fill: "#bbb", fontFamily: "'DM Mono', monospace" }} axisLine={false} tickLine={false} />
+                    <Tooltip content={<ChartTip />} />
+                    <ReferenceLine y={90} stroke="#16a34a" strokeDasharray="4 4" strokeWidth={1} label={{ value: "A", fontSize: 10, fill: "#16a34a", position: "insideTopRight" }} />
+                    <ReferenceLine y={85} stroke="#2563eb" strokeDasharray="4 4" strokeWidth={1} label={{ value: "B+", fontSize: 10, fill: "#2563eb", position: "insideTopRight" }} />
+                    <ReferenceLine y={80} stroke="#2563eb" strokeDasharray="2 4" strokeWidth={1} label={{ value: "B", fontSize: 10, fill: "#2563eb", position: "insideTopRight" }} />
+                    <Area connectNulls type="monotone" dataKey="cumulative" stroke="#111" strokeWidth={2} fill="url(#grad)" dot={{ r: 4, fill: "#111", strokeWidth: 0 }} name="cumulative" />
+                    <Line connectNulls type="monotone" dataKey="score" stroke="#ccc" strokeWidth={1.5} strokeDasharray="4 3" dot={{ r: 3, fill: "#ccc", strokeWidth: 0 }} name="score" />
+                  </AreaChart>
+                </ResponsiveContainer>
+                <div style={{ display: "flex", gap: 20, marginTop: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#aaa" }}><div style={{ width: 16, height: 2, background: "#111" }} />Cumulative avg</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#aaa" }}><div style={{ width: 16, height: 0, borderTop: "2px dashed #ccc" }} />Individual score</div>
+                </div>
+              </div>
+
+              <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 12, padding: "24px" }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: "#111", marginBottom: 16 }}>Item Breakdown</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12 }}>
+                  {trend.map((d, i) => {
+                    const gi = d.score !== null ? gradeInfo(d.score) : null;
+                    return (
+                      <div key={i} style={{ padding: "14px", border: "1px solid #f0f0f0", borderRadius: 8, background: d.pending && d.score === null ? "#fafafa" : "#fff" }}>
+                        <div style={{ fontSize: 11, color: "#bbb", marginBottom: 6 }}>{d.name}{d.pending && d.score === null ? " · pending" : d.pending ? " · entered" : ""}</div>
+                        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 700, color: d.score !== null && gi ? (d.pending ? "#aaa" : gradeColor(gi.label)) : "#e0e0e0" }}>
+                          {d.score !== null ? `${d.score}%` : "—"}
+                        </div>
+                        {d.cumulative !== null && <div style={{ fontSize: 10, color: "#ccc", marginTop: 2 }}>Running: {d.cumulative}%</div>}
+                        {d.score !== null && <div style={{ height: 3, background: "#f4f4f4", borderRadius: 2, marginTop: 8, overflow: "hidden" }}>
+                          <div style={{ width: `${d.score}%`, height: "100%", background: gi ? (d.pending ? "#ddd" : gradeColor(gi.label)) : "#ddd", borderRadius: 2 }} />
+                        </div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+}

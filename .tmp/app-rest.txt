@@ -1,0 +1,447 @@
+[/workspaces/default/code/src/App.tsx#0d2e]
+261:  const [uploadFile, setUploadFile] = useState<File | null>(null);
+262:  const [uploadStatus, setUploadStatus] = useState<"idle" | "working" | "done" | "error">("idle");
+263:  const [uploadError, setUploadError] = useState("");
+264:  const [showApiInput, setShowApiInput] = useState(false);
+265:  const [dragging, setDragging] = useState(false);
+266:  const fileInputRef = useRef<HTMLInputElement>(null);
+267:
+268:  const course = courses.find((c) => c.id === selectedId)!;
+269:  const remaining = course.components.filter(
+270:    (c) => c.earned === null && isNaN(parseFloat(inputs[c.id] ?? ""))
+271:  );
+272:  const setInput = (id: string, val: string) => setInputs((p) => ({ ...p, [id]: val }));
+273:
+274:  const projected = computeProjected(course, inputs);
+275:  const projGrade = projected !== null ? gradeFor(projected) : null;
+276:  const targetMin = GRADES.find((g) => g.label === target)?.min ?? 90;
+277:  const { minPct, maxPct } = safetyRange(course, inputs);
+278:  const targetSecured = minPct >= targetMin;
+279:  const targetImpossible = maxPct < targetMin;
+280:
+281:  const primaryComp = remaining.length > 0
+282:    ? remaining.reduce((a, b) => (a.weight > b.weight ? a : b))
+283:    : null;
+284:  const primaryNeeded = primaryComp
+285:    ? requiredOn(course, targetMin, primaryComp.id, inputs, 100)
+286:    : null;
+287:
+288:  const nextTarget = GRADES[GRADES.findIndex((g) => g.label === target) + 1];
+289:  const diagType: "secured" | "impossible" | "inplay" = targetSecured ? "secured" : targetImpossible ? "impossible" : "inplay";
+290:
+291:  const diagContent = {
+292:    secured: {
+293:      badge: "Goal Secured",
+294:      badgeBg: "#dcfce7", badgeColor: "#15803d",
+295:      note: `Even scoring 0 on everything remaining, you still reach ${target}. Take a breath.`,
+296:    },
+297:    impossible: {
+298:      badge: "Not Achievable",
+299:      badgeBg: "#fee2e2", badgeColor: "#dc2626",
+300:      note: `Even perfect scores max out at ${maxPct.toFixed(1)}% (${gradeFor(maxPct).label}). ${nextTarget ? `Redirect to ${nextTarget.label} — it's within reach.` : ""}`,
+301:    },
+302:    inplay: {
+303:      badge: "Goal Achievable",
+304:      badgeBg: "#dcfce7", badgeColor: "#15803d",
+305:      note: `Current floor ${minPct.toFixed(1)}% · ceiling ${maxPct.toFixed(1)}%.`,
+306:    },
+307:  }[diagType];
+308:
+309:  // GPA
+310:  const gpaItems = courses.map((c, i) => {
+311:    const pg = computeProjected(c, c.id === selectedId ? inputs : {});
+312:    const { maxPct: mx } = safetyRange(c, c.id === selectedId ? inputs : {});
+313:    const g = pg !== null ? gradeFor(pg) : gradeFor(mx);
+314:    return { course: c, grade: g, pct: pg ?? mx, color: BAR_COLORS[i % BAR_COLORS.length] };
+315:  });
+316:  const totalCredits = courses.reduce((s, c) => s + c.credits, 0);
+317:  const semGpa = gpaItems.reduce((s, { course: c, grade: g }) => s + g.gpa * c.credits, 0) / totalCredits;
+318:
+319:  const handleFile = (f: File) => {
+320:    if (f.type !== "application/pdf") { setUploadError("PDF files only."); return; }
+321:    setUploadFile(f); setUploadError(""); setUploadStatus("idle");
+322:  };
+323:
+324:  const handleParse = async () => {
+325:    if (!uploadFile) { setUploadError("Select a PDF first."); return; }
+326:    if (!apiKey.trim()) { setShowApiInput(true); setUploadError("Enter your Anthropic API key."); return; }
+327:    localStorage.setItem("gp_key", apiKey.trim());
+328:    setUploadStatus("working"); setUploadError("");
+329:    try {
+330:      const text = await extractPdfText(uploadFile);
+331:      const data = await parseSyllabus(text, apiKey.trim());
+332:      setCourses((prev) => prev.map((c) => c.id !== selectedId ? c : {
+333:        ...c, ...data,
+334:        components: (data.components?.length ?? 0) > 0 ? data.components! : c.components,
+335:        parsedFromSyllabus: true,
+336:      }));
+337:      setInputs({});
+338:      setUploadStatus("done");
+339:    } catch (e: any) { setUploadError(e.message); setUploadStatus("error"); }
+340:  };
+341:
+342:  const cutoffGrades = ["A+", "A", "A-", "B+", "B", "B-", "C+", "C"];
+343:  const targetButtons = ["A+", "A", "A-", "B+", "B", "B-"];
+344:
+345:  // Drop check helper
+346:  const droppedIds = (() => {
+347:    const allRaw: Record<string, number> = {};
+348:    for (const c of course.components) {
+349:      if (c.earned !== null) allRaw[c.id] = c.earned;
+350:      else { const v = parseFloat(inputs[c.id] ?? ""); if (!isNaN(v)) allRaw[c.id] = v; }
+351:    }
+352:    const kept = applyDropLowest(course, allRaw);
+353:    return new Set(Object.keys(allRaw).filter((id) => !(id in kept)));
+354:  })();
+355:
+356:  return (
+357:    <div style={{
+358:      height: "100vh", display: "flex", flexDirection: "column",
+359:      background: "#ffffff", fontFamily: "Inter, system-ui, sans-serif", color: "#111",
+360:      overflow: "hidden",
+361:    }}>
+362:      {/* ── Top bar ── */}
+363:      <div style={{
+364:        borderBottom: "1px solid #ebebeb", padding: "0 24px",
+365:        height: 44, display: "flex", alignItems: "center", justifyContent: "space-between",
+366:        flexShrink: 0, background: "#fff",
+367:      }}>
+368:        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+369:          <div style={{ width: 24, height: 24, borderRadius: 6, background: ACCENT, display: "flex", alignItems: "center", justifyContent: "center" }}>
+370:            <span style={{ color: "#fff", fontSize: 9, fontWeight: 900 }}>GP</span>
+371:          </div>
+372:          <span style={{ fontSize: 13, fontWeight: 800, color: "#111", letterSpacing: "-0.03em" }}>GradePilot Engine</span>
+373:        </div>
+374:        {/* Course tabs */}
+375:        <div style={{ display: "flex", gap: 2 }}>
+376:          {courses.map((c) => {
+377:            const pg = computeProjected(c, c.id === selectedId ? inputs : {});
+378:            const gi = pg !== null ? gradeFor(pg) : null;
+379:            const active = c.id === selectedId;
+380:            return (
+381:              <button key={c.id} onClick={() => { setSelectedId(c.id); setInputs({}); }}
+382:                style={{
+383:                  padding: "4px 12px", borderRadius: 16, border: "none",
+384:                  background: active ? "#111" : "transparent",
+385:                  color: active ? "#fff" : "#999",
+386:                  fontSize: 11, fontWeight: active ? 600 : 400, cursor: "pointer",
+387:                  display: "flex", alignItems: "center", gap: 5,
+388:                }}>
+389:                <span style={{ fontFamily: "DM Mono, monospace", fontSize: 11 }}>{c.code}</span>
+390:                {gi && <span style={{ fontFamily: "DM Mono, monospace", fontSize: 10, fontWeight: 700, color: active ? "#aaa" : (GRADE_COLORS[gi.label] ?? "#888") }}>{gi.label}</span>}
+391:              </button>
+392:            );
+393:          })}
+394:        </div>
+395:      </div>
+396:
+397:      {/* ── Page content ── */}
+398:      <div style={{ flex: 1, overflow: "hidden", padding: "14px 24px 14px" }}>
+399:
+400:        {/* Two-column grid — fills remaining height */}
+401:        <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 14, height: "100%", alignItems: "start" }}>
+402:
+403:          {/* ── Left column ── */}
+404:          <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", overflow: "hidden" }}>
+405:
+406:            {/* Syllabus upload card — compact */}
+407:            <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, overflow: "hidden", flexShrink: 0 }}>
+408:              <div style={{ padding: "11px 18px", borderBottom: "1px solid #f4f4f4", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+409:                <div>
+410:                  <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Syllabus Upload</div>
+411:                  <div style={{ fontSize: 11, color: "#aaa" }}>AI extracts grading weights and hidden rules automatically</div>
+412:                </div>
+413:                {course.parsedFromSyllabus && <span style={{ fontSize: 10, color: ACCENT, fontWeight: 700 }}>✦ AI Parsed</span>}
+414:              </div>
+415:              <div style={{ padding: "10px 18px 12px" }}>
+416:                {showApiInput && (
+417:                  <input type="password" placeholder="Anthropic API key  sk-ant-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+418:                    style={{ width: "100%", padding: "6px 10px", border: "1px solid #e4e4e4", borderRadius: 7, fontSize: 12, fontFamily: "DM Mono, monospace", outline: "none", marginBottom: 8, boxSizing: "border-box" }} />
+419:                )}
+420:                {/* Compact drop zone */}
+421:                <div
+422:                  onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+423:                  onDragLeave={() => setDragging(false)}
+424:                  onDrop={(e) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f); }}
+425:                  onClick={() => fileInputRef.current?.click()}
+426:                  style={{
+427:                    border: `2px dashed ${dragging ? ACCENT : uploadFile ? "#16a34a" : "#e0e0e0"}`,
+428:                    borderRadius: 9, padding: "10px 16px", cursor: "pointer",
+429:                    background: dragging ? "#fff8f7" : uploadFile ? "#f0fdf4" : "#fafafa",
+430:                    display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
+431:                  }}>
+432:                  <input ref={fileInputRef} type="file" accept=".pdf" style={{ display: "none" }}
+433:                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+434:                  <FileIcon color={uploadFile ? "#16a34a" : "#ccc"} size={20} />
+435:                  <span style={{ fontSize: 12, color: uploadFile ? "#15803d" : "#888", fontWeight: uploadFile ? 600 : 400 }}>
+436:                    {uploadFile ? uploadFile.name : "Drop PDF here or click to browse"}
+437:                  </span>
+438:                </div>
+439:                {uploadError && <div style={{ fontSize: 11, color: "#dc2626", marginBottom: 6 }}>{uploadError}</div>}
+440:                {uploadStatus === "done" && <div style={{ fontSize: 11, color: "#15803d", marginBottom: 6 }}>✓ Applied to {course.code}.</div>}
+441:                <div style={{ display: "flex", gap: 6 }}>
+442:                  <button onClick={handleParse} disabled={uploadStatus === "working" || !uploadFile}
+443:                    style={{ flex: 1, padding: "7px 0", borderRadius: 8, border: "none", background: (!uploadFile || uploadStatus === "working") ? "#f0f0f0" : ACCENT, color: (!uploadFile || uploadStatus === "working") ? "#aaa" : "#fff", fontSize: 12, fontWeight: 700, cursor: uploadFile ? "pointer" : "default" }}>
+444:                    {uploadStatus === "working" ? "Parsing…" : "Analyze with AI"}
+445:                  </button>
+446:                  <button onClick={() => setShowApiInput((v) => !v)}
+447:                    style={{ padding: "7px 12px", borderRadius: 8, border: "1px solid #e4e4e4", background: "#fff", color: "#888", fontSize: 11, cursor: "pointer" }}>
+448:                    API Key
+449:                  </button>
+450:                </div>
+451:              </div>
+452:            </div>
+453:
+454:            {/* Assessment table */}
+455:            <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, overflow: "hidden", flexShrink: 0 }}>
+456:              <div style={{ padding: "10px 18px 8px", borderBottom: "1px solid #f4f4f4" }}>
+457:                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+458:                  <div>
+459:                    <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>{course.code} — {course.name}</div>
+460:                    <div style={{ fontSize: 11, color: "#aaa" }}>{course.professor} · {course.credits} cr</div>
+461:                  </div>
+462:                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+463:                    {course.dropLowest && <span style={{ fontSize: 9, color: "#1d4ed8", background: "#eff6ff", padding: "2px 6px", borderRadius: 4, fontWeight: 700 }}>DROP LOWEST</span>}
+464:                    {course.penaltyNote && <span style={{ fontSize: 9, color: "#92400e", background: "#fffbeb", padding: "2px 6px", borderRadius: 4, fontWeight: 700 }}>⚠ PENALTY</span>}
+465:                    {projGrade && projected !== null && (
+466:                      <div style={{ textAlign: "right" }}>
+467:                        <span style={{ fontFamily: "DM Mono, monospace", fontSize: 18, fontWeight: 900, color: GRADE_COLORS[projGrade.label] ?? "#888" }}>{projGrade.label}</span>
+468:                        <span style={{ fontFamily: "DM Mono, monospace", fontSize: 10, color: "#bbb", marginLeft: 4 }}>{projected.toFixed(1)}%</span>
+469:                      </div>
+470:                    )}
+471:                  </div>
+472:                </div>
+473:              </div>
+474:
+475:              {/* Table header */}
+476:              <div style={{ display: "grid", gridTemplateColumns: "1fr 60px 120px 50px", padding: "6px 18px", background: "#fafafa", borderBottom: "1px solid #f4f4f4" }}>
+477:                {["Assessment", "Wt.", "Score", "Gr."].map((h) => (
+478:                  <div key={h} style={{ fontSize: 9, color: "#bbb", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>{h}</div>
+479:                ))}
+480:              </div>
+481:
+482:              {course.components.map((comp, i) => {
+483:                const isPending = comp.earned === null;
+484:                const inputVal = inputs[comp.id] ?? "";
+485:                const num = isPending ? parseFloat(inputVal) : comp.earned!;
+486:                const pct = isNaN(num) ? null : (num / comp.total) * 100;
+487:                const gi = pct !== null ? gradeFor(pct) : null;
+488:                const isDropped = droppedIds.has(comp.id);
+489:
+490:                return (
+491:                  <div key={comp.id} style={{
+492:                    display: "grid", gridTemplateColumns: "1fr 60px 120px 50px",
+493:                    padding: "8px 18px", alignItems: "center",
+494:                    borderBottom: i < course.components.length - 1 ? "1px solid #f8f8f8" : "none",
+495:                    opacity: isDropped ? 0.4 : 1,
+496:                    background: isPending && !isDropped ? "#fdfcfb" : "#fff",
+497:                  }}>
+498:                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+499:                      <div style={{ width: 5, height: 5, borderRadius: "50%", flexShrink: 0, background: isPending ? "#ddd" : ACCENT }} />
+500:                      <span style={{ fontSize: 12, color: "#111", fontWeight: 500, textDecoration: isDropped ? "line-through" : "none" }}>{comp.name}</span>
+501:                      {isDropped && <span style={{ fontSize: 8, fontWeight: 700, color: "#bbb", background: "#f4f4f4", padding: "1px 4px", borderRadius: 3 }}>DROPPED</span>}
+502:                    </div>
+503:                    <div style={{ fontFamily: "DM Mono, monospace", fontSize: 11, color: "#888", fontWeight: 600 }}>{comp.weight}%</div>
+504:                    <div>
+505:                      {isPending ? (
+506:                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+507:                          <input type="number" min={0} max={comp.total} placeholder="—"
+508:                            value={inputVal} onChange={(e) => setInput(comp.id, e.target.value)}
+509:                            style={{ width: 54, padding: "4px 7px", border: "1.5px solid #e4e4e4", borderRadius: 6, fontSize: 13, fontFamily: "DM Mono, monospace", fontWeight: 700, outline: "none", color: "#111", textAlign: "center", background: "#fafafa" }}
+510:                            onFocus={(e) => { e.target.style.borderColor = ACCENT; e.target.style.background = "#fff"; }}
+511:                            onBlur={(e) => { e.target.style.borderColor = "#e4e4e4"; e.target.style.background = "#fafafa"; }}
+512:                          />
+513:                          <span style={{ fontSize: 10, color: "#ccc", fontFamily: "DM Mono, monospace" }}>/{comp.total}</span>
+514:                        </div>
+515:                      ) : (
+516:                        <span style={{ fontFamily: "DM Mono, monospace", fontSize: 12, fontWeight: 700, color: "#111" }}>
+517:                          {comp.earned}<span style={{ color: "#ccc", fontWeight: 400 }}>/{comp.total}</span>
+518:                        </span>
+519:                      )}
+520:                    </div>
+521:                    <div>
+522:                      {gi ? (
+523:                        <span style={{ fontFamily: "DM Mono, monospace", fontSize: 11, fontWeight: 800, color: isPending ? "#bbb" : (GRADE_COLORS[gi.label] ?? "#888") }}>{gi.label}</span>
+524:                      ) : <span style={{ fontSize: 10, color: "#ddd" }}>—</span>}
+525:                    </div>
+526:                  </div>
+527:                );
+528:              })}
+529:            </div>
+530:
+531:            {/* Grade cutoff table */}
+532:            {remaining.length > 0 && (
+533:              <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, overflow: "hidden", flex: 1, minHeight: 0 }}>
+534:                <div style={{ padding: "10px 18px 8px", borderBottom: "1px solid #f4f4f4", display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+535:                  <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>All-Grade Cutoff Table</div>
+536:                  <div style={{ fontSize: 10, color: "#bbb" }}>min. score per remaining item</div>
+537:                </div>
+538:                <div style={{ overflowX: "auto", overflowY: "auto", height: "calc(100% - 41px)" }}>
+539:                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+540:                    <thead>
+541:                      <tr style={{ borderBottom: "1px solid #f0f0f0" }}>
+542:                        <th style={{ textAlign: "left", padding: "6px 10px 6px 18px", fontSize: 9, color: "#bbb", fontWeight: 700, textTransform: "uppercase", position: "sticky", top: 0, background: "#fafafa" }}>Grade</th>
+543:                        <th style={{ textAlign: "left", padding: "6px 10px", fontSize: 9, color: "#bbb", fontWeight: 700, textTransform: "uppercase", position: "sticky", top: 0, background: "#fafafa" }}>Cut</th>
+544:                        {remaining.map((c) => (
+545:                          <th key={c.id} style={{ textAlign: "right", padding: "6px 10px", fontSize: 9, color: "#bbb", fontWeight: 700, textTransform: "uppercase", whiteSpace: "nowrap", position: "sticky", top: 0, background: "#fafafa" }}>
+546:                            {c.name.replace("Examination", "Exam").replace("Reflection Paper", "Reflection")}
+547:                          </th>
+548:                        ))}
+549:                        <th style={{ textAlign: "right", padding: "6px 18px 6px 10px", fontSize: 9, color: "#bbb", fontWeight: 700, textTransform: "uppercase", position: "sticky", top: 0, background: "#fafafa" }}>Verdict</th>
+550:                      </tr>
+551:                    </thead>
+552:                    <tbody>
+553:                      {cutoffGrades.map((gl) => {
+554:                        const g = GRADES.find((x) => x.label === gl)!;
+555:                        const neededs = remaining.map((c) => requiredOn(course, g.min, c.id, inputs, 100));
+556:                        const worst = Math.max(...neededs);
+557:                        const allImp = neededs.every((n) => n > 100);
+558:                        const allSec = neededs.every((n) => n <= 0);
+559:                        const isTarget = gl === target;
+560:                        const vc = allImp ? "#dc2626" : allSec ? "#15803d" : worst <= 75 ? "#15803d" : worst <= 88 ? "#2563eb" : "#b45309";
+561:                        const vt = allImp ? "Impossible" : allSec ? "Secured ✓" : worst <= 75 ? "Safe" : worst <= 88 ? "Doable" : worst <= 95 ? "Hard push" : "Very tight";
+562:                        return (
+563:                          <tr key={gl} style={{ borderTop: "1px solid #f8f8f8", background: isTarget ? "#fdf9f8" : "transparent" }}>
+564:                            <td style={{ padding: "7px 10px 7px 18px" }}>
+565:                              <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+566:                                <span style={{ fontFamily: "DM Mono, monospace", fontSize: 12, fontWeight: 800, color: GRADE_COLORS[gl] ?? "#888" }}>{gl}</span>
+567:                                {isTarget && <span style={{ fontSize: 8, fontWeight: 700, color: ACCENT, background: "#fff0ed", padding: "1px 4px", borderRadius: 3 }}>TARGET</span>}
+568:                              </div>
+569:                            </td>
+570:                            <td style={{ padding: "7px 10px", fontFamily: "DM Mono, monospace", fontSize: 10, color: "#bbb" }}>{g.min}%</td>
+571:                            {neededs.map((n, i) => {
+572:                              const imp = n > 100, sec = n <= 0;
+573:                              return (
+574:                                <td key={i} style={{ textAlign: "right", padding: "7px 10px" }}>
+575:                                  <span style={{ fontFamily: "DM Mono, monospace", fontSize: 12, fontWeight: 700, color: imp ? "#dc2626" : sec ? "#15803d" : n > 90 ? "#b45309" : "#111" }}>
+576:                                    {imp ? "N/A" : sec ? "Any" : Math.ceil(n)}
+577:                                  </span>
+578:                                </td>
+579:                              );
+580:                            })}
+581:                            <td style={{ textAlign: "right", padding: "7px 18px 7px 10px" }}>
+582:                              <span style={{ fontSize: 10, fontWeight: 700, color: vc }}>{vt}</span>
+583:                            </td>
+584:                          </tr>
+585:                        );
+586:                      })}
+587:                    </tbody>
+588:                  </table>
+589:                </div>
+590:              </div>
+591:            )}
+592:          </div>
+593:
+594:          {/* ── Right column ── */}
+595:          <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", overflow: "hidden" }}>
+596:
+597:            {/* Target grade card */}
+598:            <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, overflow: "hidden", flexShrink: 0 }}>
+599:              <div style={{ padding: "10px 18px 8px", borderBottom: "1px solid #f4f4f4", display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+600:                <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Target Grade</div>
+601:                <div style={{ fontSize: 11, color: "#aaa" }}>{course.code}</div>
+602:              </div>
+603:              <div style={{ padding: "12px 18px 14px" }}>
+604:                {/* Grade buttons */}
+605:                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 12 }}>
+606:                  {targetButtons.map((g) => {
+607:                    const active = target === g;
+608:                    return (
+609:                      <button key={g} onClick={() => setTarget(g)}
+610:                        style={{
+611:                          padding: "8px 0", borderRadius: 9,
+612:                          border: `2px solid ${active ? ACCENT : "#e8e8e8"}`,
+613:                          background: active ? ACCENT : "#fff",
+614:                          color: active ? "#fff" : "#aaa",
+615:                          fontSize: 13, fontWeight: 800, fontFamily: "DM Mono, monospace",
+616:                          cursor: "pointer", transition: "all 0.12s",
+617:                        }}>
+618:                        {g}
+619:                      </button>
+620:                    );
+621:                  })}
+622:                </div>
+623:
+624:                {/* Score hero */}
+625:                <div style={{
+626:                  borderRadius: 12, padding: "14px 16px", textAlign: "center",
+627:                  background: diagType === "impossible" ? "#fef6f5" : diagType === "secured" ? "#f3fef6" : "#fef9f7",
+628:                  border: `1.5px solid ${diagType === "impossible" ? "#fecaca" : diagType === "secured" ? "#bbf7d0" : "#f0e0dc"}`,
+629:                }}>
+630:                  <div style={{ fontSize: 10, color: "#aaa", marginBottom: 6 }}>
+631:                    {primaryComp ? `Min. needed — ${primaryComp.name}` : "Minimum required score"}
+632:                  </div>
+633:
+634:                  {diagType === "secured" ? (
+635:                    <div style={{ fontFamily: "DM Mono, monospace", fontSize: 44, fontWeight: 900, color: "#15803d", lineHeight: 1 }}>✓</div>
+636:                  ) : diagType === "impossible" ? (
+637:                    <div style={{ fontFamily: "DM Mono, monospace", fontSize: 44, fontWeight: 900, color: "#dc2626", lineHeight: 1 }}>✕</div>
+638:                  ) : primaryNeeded !== null ? (
+639:                    <div style={{ lineHeight: 1 }}>
+640:                      <span style={{ fontFamily: "DM Mono, monospace", fontSize: 50, fontWeight: 900, color: "#111", letterSpacing: "-0.03em" }}>
+641:                        {Math.ceil(primaryNeeded)}
+642:                      </span>
+643:                      <span style={{ fontFamily: "DM Mono, monospace", fontSize: 15, color: "#888", marginLeft: 2 }}>pts</span>
+644:                    </div>
+645:                  ) : (
+646:                    <div style={{ fontFamily: "DM Mono, monospace", fontSize: 30, color: "#aaa" }}>—</div>
+647:                  )}
+648:
+649:                  <div style={{
+650:                    display: "inline-flex", alignItems: "center", gap: 4,
+651:                    marginTop: 8, padding: "4px 12px", borderRadius: 20,
+652:                    background: diagContent.badgeBg, color: diagContent.badgeColor,
+653:                    fontSize: 10, fontWeight: 700,
+654:                  }}>
+655:                    {diagType !== "impossible" ? "✓" : "✕"} {diagContent.badge}
+656:                  </div>
+657:
+658:                  <div style={{ fontSize: 10, color: "#999", marginTop: 7, lineHeight: 1.55 }}>
+659:                    {diagContent.note}
+660:                  </div>
+661:                </div>
+662:
+663:                {/* Current projected */}
+664:                {projGrade && projected !== null && (
+665:                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, padding: "8px 12px", background: "#fafafa", borderRadius: 8, border: "1px solid #f0f0f0" }}>
+666:                    <span style={{ fontSize: 11, color: "#888" }}>Current projected</span>
+667:                    <span style={{ fontFamily: "DM Mono, monospace", fontSize: 16, fontWeight: 900, color: GRADE_COLORS[projGrade.label] ?? "#888" }}>
+668:                      {projGrade.label} <span style={{ fontSize: 10, fontWeight: 400, color: "#bbb" }}>{projected.toFixed(1)}%</span>
+669:                    </span>
+670:                  </div>
+671:                )}
+672:              </div>
+673:            </div>
+674:
+675:            {/* Semester GPA card */}
+676:            <div style={{ background: "#fff", border: "1px solid #ebebeb", borderRadius: 14, padding: "12px 18px", flex: 1, minHeight: 0, overflow: "auto" }}>
+677:              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 14 }}>
+678:                <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Estimated Semester GPA</div>
+679:                <div>
+680:                  <span style={{ fontFamily: "DM Mono, monospace", fontSize: 22, fontWeight: 900, color: "#111", letterSpacing: "-0.02em" }}>{semGpa.toFixed(2)}</span>
+681:                  <span style={{ fontFamily: "DM Mono, monospace", fontSize: 10, color: "#bbb" }}> / 4.5</span>
+682:                </div>
+683:              </div>
+684:              {gpaItems.map(({ course: c, grade: g, pct, color }) => (
+685:                <div key={c.id} style={{ marginBottom: 12 }}>
+686:                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+687:                    <div>
+688:                      <div style={{ fontSize: 11, fontWeight: 600, color: "#333" }}>{c.code}</div>
+689:                      <div style={{ fontSize: 10, color: "#bbb" }}>{c.name}</div>
+690:                    </div>
+691:                    <span style={{ fontFamily: "DM Mono, monospace", fontSize: 13, fontWeight: 800, color: GRADE_COLORS[g.label] ?? "#888" }}>{g.label}</span>
+692:                  </div>
+693:                  <div style={{ height: 4, background: "#f0f0f0", borderRadius: 2, overflow: "hidden" }}>
+694:                    <div style={{ width: `${Math.max(0, Math.min(100, pct))}%`, height: "100%", background: color, borderRadius: 2, transition: "width 0.4s ease" }} />
+695:                  </div>
+696:                </div>
+697:              ))}
+698:            </div>
+699:          </div>
+700:        </div>
+701:      </div>
+702:    </div>
+703:  );
+704:}
+
+(End of file — 704 lines.)
