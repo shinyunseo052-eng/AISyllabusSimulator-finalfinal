@@ -285,13 +285,12 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .welcome-actions {
   display: grid;
   margin-top: 14px;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 
 .welcome-primary-action,
-.welcome-secondary-action,
-.welcome-demo-action {
+.welcome-secondary-action {
   border-radius: 9px;
   cursor: pointer;
   font-size: 10px;
@@ -320,18 +319,7 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
   color: #676c73;
 }
 
-.welcome-demo-action {
-  display: block;
-  margin: 13px auto 0;
-  padding: 5px 8px;
-  border: 0;
-  background: transparent;
-  color: #9a9ea4;
-  font-weight: 500;
-}
-
-.welcome-secondary-action:hover,
-.welcome-demo-action:hover {
+.welcome-secondary-action:hover {
   color: #b8323e;
 }
 

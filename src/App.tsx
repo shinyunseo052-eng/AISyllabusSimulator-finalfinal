@@ -1310,10 +1310,6 @@ export default function App() {
                 {uploadStatus === "working" ? "Analyzing syllabus..." : "Analyze syllabus"}
               </button>
             </div>
-
-            <button className="welcome-demo-action" onClick={() => setShowWelcome(false)}>
-              Preview with sample courses
-            </button>
           </section>
         </main>
       </div>
