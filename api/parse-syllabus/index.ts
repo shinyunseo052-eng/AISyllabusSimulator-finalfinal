@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { parseSyllabusRequest } from "../server/parseSyllabusRequest";
+import { parseSyllabusRequest } from "./parseSyllabusRequest.ts";
 
 export const config = {
   runtime: "nodejs",
