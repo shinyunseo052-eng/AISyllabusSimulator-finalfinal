@@ -10,7 +10,7 @@
     "format": "oxfmt"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.124.0",
+    "groq-sdk": "^1.6.0",
     "pdfjs-dist": "^6.3.289",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
