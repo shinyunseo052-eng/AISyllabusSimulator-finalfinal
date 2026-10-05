@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Connect, Plugin, ViteDevServer } from "vite";
 import { loadEnv } from "vite";
-import { parseSyllabusWithGroq } from "./parseSyllabus";
+import { parseSyllabusRequest } from "./parseSyllabusRequest";
 
 const ROUTE = "/api/parse-syllabus";
 const MAX_BODY_BYTES = 256 * 1024;
@@ -52,20 +52,9 @@ function attachParseSyllabusRoute(middlewares: Connect.Server, mode: string) {
     }
 
     try {
-      const apiKey = groqApiKey(mode);
-      if (!apiKey) {
-        sendJson(res, 500, { error: "Syllabus parsing is not configured." });
-        return;
-      }
-
       const body = (await readJsonBody(req)) as { text?: unknown };
-      if (typeof body.text !== "string" || !body.text.trim()) {
-        sendJson(res, 400, { error: "Syllabus text is required." });
-        return;
-      }
-
-      const parsed = await parseSyllabusWithGroq(body.text, apiKey);
-      sendJson(res, 200, parsed);
+      const result = await parseSyllabusRequest(body.text, groqApiKey(mode));
+      sendJson(res, result.status, result.body);
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : "Failed to parse syllabus.";
