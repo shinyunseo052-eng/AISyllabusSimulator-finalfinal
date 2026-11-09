@@ -673,23 +673,39 @@ async function parseSyllabusWithGroq(
 
       const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
       return expandRepeatedAssessments(parsed, text);
-    } catch (error) {
-  if (error instanceof APIError) {
-    console.error("[GradePilot] Groq API Error:", {
-      status: error.status,
-      message: error.message,
-    });
-  } else {
-    console.error(
-      "[GradePilot] Error:",
-      error instanceof Error ? error.message : String(error)
-    );
-  }
+        } catch (error) {
+      if (error instanceof APIError) {
+        console.error("[GradePilot] Groq API Error:", {
+          status: error.status,
+          message: error.message,
+        });
+      } else {
+        console.error(
+          "[GradePilot] Error:",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
 
-  if (error instanceof SyntaxError) throw groqUserError(error);
+      if (error instanceof SyntaxError) throw groqUserError(error);
+
+      lastError = error;
+
+      const canRetry =
+        isRetryableGroqError(error) && attempt < RETRY_DELAYS_MS.length;
+
+      if (!canRetry) throw groqUserError(error);
+
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
 
   throw groqUserError(lastError);
 }
+
+async function parseSyllabusRequest(
+  text: unknown,
+  apiKey: string
+): Promise<{ status: number; body: unknown }> {
 
 async function parseSyllabusRequest(
   text: unknown,
