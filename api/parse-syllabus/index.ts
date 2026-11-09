@@ -15,6 +15,7 @@ const MIN_WINDOW_SCORE = 4;
 const BUSY_ERROR = "The AI service is temporarily busy. Please try again in a moment.";
 const RETRY_DELAYS_MS = [1000, 2000, 4000];
 const GROQ_MODEL = "openai/gpt-oss-20b";
+const ALLOWED_ORIGIN = "https://shinyunseo052-eng.github.io";
 
 const EXTRACTION_PROMPT_PREFIX = `Extract grading from this syllabus. Return ONLY valid JSON.
 
@@ -715,13 +716,29 @@ function requestBody(req: JsonRequest): unknown {
   return {};
 }
 
+function setCorsHeaders(res: ServerResponse) {
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Vary", "Origin");
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown) {
+  setCorsHeaders(res);
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
 }
 
 export default async function handler(req: JsonRequest, res: ServerResponse) {
+  setCorsHeaders(res);
+
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
   if (req.method !== "POST") {
     sendJson(res, 405, { error: "Method not allowed." });
     return;
