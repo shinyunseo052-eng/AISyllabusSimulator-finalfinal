@@ -673,7 +673,7 @@ async function parseSyllabusWithGroq(
 
       const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
       return expandRepeatedAssessments(parsed, text);
-    } catch (error) {
+  } catch (error) {
       if (error instanceof APIError) {
         console.error("[GradePilot] Groq API Error:", {
           status: error.status,
